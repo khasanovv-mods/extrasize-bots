@@ -58,7 +58,7 @@ PRICE_LIST_TEXT = """
 
 ━━━━━━━━━━━━━━━━━━━━━
 
- Private skins - 50₽
+ Private skins - 75₽
  Private models (инта | здание) - 50₽
  Private sborka - 150-300₽
 
@@ -81,7 +81,7 @@ PRICE_LIST_TEXT = """
 
 ━━━━━━━━━━━━━━━━━━━━━
 
-<i>Цены актуальны на май 2026 г.</i>
+<i>Цены актуальны на октябрь 2026 г.</i>
 """
 
 user_keyboard = ReplyKeyboardMarkup(
