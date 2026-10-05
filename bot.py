@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 
 WAITING_QUESTION, WAITING_REPLY = range(2)
 
-PRICE_LIST_IMAGE = "https://i.ibb.co/jZ1WtWRL/photo-2026-04-06-03-21-49-2.jpg"
+PRICE_LIST_IMAGE = "https://ibb.co/xq2MwF6G"
 
 PRICE_LIST_TEXT = """
 💰 <b>ПРАЙС-ЛИСТ</b>
