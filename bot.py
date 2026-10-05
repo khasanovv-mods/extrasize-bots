@@ -17,7 +17,11 @@ from telegram.constants import ParseMode
 
 from database import (
     init_db, create_ticket, get_ticket, get_ticket_status,
-    get_old_pending_tickets, take_ticket, update_status
+    get_old_pending_tickets, take_ticket, update_status,
+    close_stale_chats,
+    create_chat_request, accept_chat as db_accept_chat, close_chat,
+    get_chat, get_active_chat_partner, has_active_chat,
+    get_open_chat_by_user,
 )
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -27,13 +31,11 @@ if not BOT_TOKEN:
         BOT_TOKEN = LOCAL_TOKEN
     except ImportError:
         pass
-
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не задан")
 
 ADMIN_IDS_STR = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_STR.split(",") if x.strip()]
-
 if not ADMIN_IDS:
     try:
         from config import ADMIN_IDS as LOCAL_ADMINS
@@ -92,6 +94,7 @@ user_keyboard = ReplyKeyboardMarkup(
 )
 
 
+# ==================== /start ====================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await update.message.reply_text(
@@ -103,6 +106,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ==================== ПРАЙС ====================
 async def show_price_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await update.message.reply_photo(
@@ -121,9 +125,10 @@ async def show_price_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+# ==================== ТИКЕТЫ (Задать вопрос) ====================
 async def contact_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📞 <b>Связь с администрацией</b>\n\n"
+        "❓ <b>Новый вопрос</b>\n\n"
         "Опишите свой вопрос/проблему ниже.\n"
         "При необходимости прикрепите фото, видео или файл.\n\n"
         "Просто отправьте сообщение — я создам тикет.",
@@ -220,6 +225,7 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await _create_ticket_from_message(update, context)
 
 
+# ==================== ТИКЕТЫ: ответ админа ====================
 async def _try_take(query, ticket_id, action_name):
     admin = query.from_user
 
@@ -436,6 +442,246 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+# ==================== ЖИВОЙ ЧАТ: запрос ====================
+async def request_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+
+    # уже есть активный чат?
+    partner = await get_active_chat_partner(user.id)
+    if partner:
+        await update.message.reply_text(
+            "⏳ У вас уже есть активный чат с администрацией.\n"
+            "Пишите сообщения — они уйдут администратору.\n"
+            "Чтобы закончить — /stopchat",
+            reply_markup=user_keyboard
+        )
+        return
+
+    chat_id = await create_chat_request(user.id, user.username or user.full_name)
+
+    admin_kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Принять", callback_data=f"chat_accept_{chat_id}"),
+            InlineKeyboardButton("❌ Отклонить", callback_data=f"chat_decline_{chat_id}"),
+        ]
+    ])
+
+    username = user.username or user.full_name
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_message(
+                admin_id,
+                f"📞 <b>Запрос на связь (чат)</b>\n\n"
+                f"👤 @{username} (ID: <code>{user.id}</code>)\n\n"
+                f"Хочет связаться с администрацией.",
+                reply_markup=admin_kb,
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e:
+            logger.error(f"Не удалось отправить заявку админу {admin_id}: {e}")
+
+    await update.message.reply_text(
+        "✅ Ваш запрос отправлен администрации.\n"
+        "⏳ Ожидайте — как только кто-то примет, сможете общаться.\n\n"
+        "<i>Как только чат откроется, просто пишите сюда сообщения "
+        "(текст, фото, видео, файлы) — они уйдут администратору.</i>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=user_keyboard
+    )
+
+
+async def chat_accept_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    admin = query.from_user
+
+    if admin.id not in ADMIN_IDS:
+        await query.answer("⛔ Нет прав", show_alert=True)
+        return
+
+    chat_id = int(query.data.split("_")[2])
+    chat = await get_chat(chat_id)
+    if not chat:
+        await query.answer("❌ Заявка не найдена", show_alert=True)
+        return
+
+    if chat["active"]:
+        await query.answer(
+            f"⛔ Заявку уже принял @{chat['admin_username']}",
+            show_alert=True
+        )
+        return
+
+    ok = await db_accept_chat(chat_id, admin.id, admin.username or admin.full_name)
+    if not ok:
+        await query.answer("⛔ Не удалось принять (уже принята)", show_alert=True)
+        return
+
+    await query.answer("✅ Вы приняли запрос")
+
+    # уведомим других админов, что заявка ушла
+    for aid in ADMIN_IDS:
+        if aid == admin.id:
+            continue
+        try:
+            await context.bot.send_message(
+                aid,
+                f"ℹ️ Администратор @{admin.username or admin.full_name} принял "
+                f"запрос на связь от @{chat['username']}.",
+                parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            pass
+
+    # обновим сообщение у админа
+    try:
+        await query.edit_message_text(
+            f"✅ Вы приняли запрос от @{chat['username']} (ID: <code>{chat['user_id']}</code>).\n\n"
+            f"💬 Пишите сообщения — они уйдут пользователю.\n"
+            f"📌 Чтобы закончить — /stopchat",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception:
+        pass
+
+    # уведомим юзера
+    try:
+        await context.bot.send_message(
+            chat["user_id"],
+            "🎉 <b>Администратор подключился!</b>\n\n"
+            "💬 Пишите свои сообщения — они будут переданы администратору.\n"
+            "📌 Чтобы закончить — /stopchat",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.error(f"Не удалось уведомить юзера {chat['user_id']}: {e}")
+
+
+async def chat_decline_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    admin = query.from_user
+
+    if admin.id not in ADMIN_IDS:
+        await query.answer("⛔ Нет прав", show_alert=True)
+        return
+
+    chat_id = int(query.data.split("_")[2])
+    chat = await get_chat(chat_id)
+    if not chat:
+        await query.answer("❌ Заявка не найдена", show_alert=True)
+        return
+
+    if chat["active"]:
+        await query.answer("⛔ Заявку уже принял другой администратор", show_alert=True)
+        return
+
+    await close_chat(chat_id)
+
+    try:
+        await query.edit_message_text(
+            f"❌ Вы отклонили запрос от @{chat['username']}.",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception:
+        pass
+
+    try:
+        await context.bot.send_message(
+            chat["user_id"],
+            "❌ К сожалению, администрация сейчас не может ответить.\n"
+            "Попробуйте позже."
+        )
+    except Exception as e:
+        logger.error(f"Не удалось уведомить юзера: {e}")
+
+
+# ==================== ЖИВОЙ ЧАТ: пересылка сообщений ====================
+async def chat_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ловит любое сообщение (текст/фото/видео/документ) и пересылает партнёру, если есть активный чат."""
+    user_id = update.effective_user.id
+    msg = update.message
+    if not msg:
+        return
+
+    # не перехватываем команды и кнопки меню
+    if msg.text and (msg.text.startswith("/") or msg.text in (
+        "❓ Задать вопрос", "💰 Прайс-лист", "📞 Связь с администрацией"
+    )):
+        return
+
+    partner_id = await get_active_chat_partner(user_id)
+    if not partner_id:
+        return
+
+    # добавляем подпись кто пишет
+    is_admin = user_id in ADMIN_IDS
+    sender_name = update.effective_user.username or update.effective_user.full_name
+    prefix = f"👨‍💼 <b>Администратор @{sender_name}:</b>" if is_admin else f"👤 <b>@{sender_name}:</b>"
+
+    try:
+        if msg.photo:
+            await context.bot.send_photo(
+                partner_id, msg.photo[-1].file_id,
+                caption=(msg.caption and f"{prefix}\n{msg.caption}") or prefix,
+                parse_mode=ParseMode.HTML
+            )
+        elif msg.video:
+            await context.bot.send_video(
+                partner_id, msg.video.file_id,
+                caption=(msg.caption and f"{prefix}\n{msg.caption}") or prefix,
+                parse_mode=ParseMode.HTML
+            )
+        elif msg.document:
+            await context.bot.send_document(
+                partner_id, msg.document.file_id,
+                caption=(msg.caption and f"{prefix}\n{msg.caption}") or prefix,
+                parse_mode=ParseMode.HTML
+            )
+        elif msg.text:
+            await context.bot.send_message(
+                partner_id,
+                f"{prefix}\n{msg.text}",
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            # прочие типы (голосовые, стикеры и т.п.) — просто копируем
+            await msg.copy(chat_id=partner_id)
+    except Exception as e:
+        logger.error(f"Ошибка пересылки сообщения {user_id} -> {partner_id}: {e}")
+        await msg.reply_text("❌ Не удалось доставить сообщение администратору.")
+
+
+# ==================== ЖИВОЙ ЧАТ: /stopchat ====================
+async def stop_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    partner_id = await get_active_chat_partner(user_id)
+
+    if not partner_id:
+        await update.message.reply_text(
+            "❌ У вас нет активного чата.",
+            reply_markup=user_keyboard
+        )
+        return
+
+    # находим chat_id
+    chat = await get_open_chat_by_user(user_id if user_id not in ADMIN_IDS else partner_id)
+    if chat:
+        await close_chat(chat["id"])
+
+    await update.message.reply_text("🔴 Чат завершён.", reply_markup=user_keyboard)
+
+    try:
+        await context.bot.send_message(
+            partner_id,
+            "🔴 <b>Собеседник завершил чат.</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=user_keyboard if partner_id not in ADMIN_IDS else None
+        )
+    except Exception:
+        pass
+
+
+# ==================== /pending и напоминания ====================
 async def cmd_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("⛔ Нет прав")
@@ -480,8 +726,10 @@ async def check_pending_tickets(context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
+# ==================== STARTUP ====================
 async def post_init(app: Application):
     await init_db()
+    await close_stale_chats()
     logger.info("✅ БД инициализирована")
 
 
@@ -496,7 +744,6 @@ def main():
     question_conv = ConversationHandler(
         entry_points=[
             MessageHandler(filters.Regex("^❓ Задать вопрос$"), contact_admin),
-            MessageHandler(filters.Regex("^📞 Связь с администрацией$"), contact_admin),
         ],
         states={
             WAITING_QUESTION: [
@@ -526,16 +773,32 @@ def main():
         per_message=False,
     )
 
+    # порядок важен: сначала ConversationHandler'ы, потом общий перехватчик чата
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("pending", cmd_pending))
+    application.add_handler(CommandHandler("stopchat", stop_chat_command))
 
     application.add_handler(MessageHandler(filters.Regex("^💰 Прайс-лист$"), show_price_list))
+    application.add_handler(MessageHandler(filters.Regex("^📞 Связь с администрацией$"), request_chat))
 
     application.add_handler(question_conv)
     application.add_handler(reply_conv)
 
+    application.add_handler(CallbackQueryHandler(chat_accept_callback, pattern=r"^chat_accept_\d+$"))
+    application.add_handler(CallbackQueryHandler(chat_decline_callback, pattern=r"^chat_decline_\d+$"))
+
     application.add_handler(CallbackQueryHandler(approve_button, pattern=r"^approve_\d+$"))
     application.add_handler(CallbackQueryHandler(reject_button, pattern=r"^reject_\d+$"))
+
+    # ловим всё подряд — но отфильтруем внутри чат-хендлера
+    application.add_handler(
+        MessageHandler(
+            (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL)
+            & ~filters.COMMAND,
+            chat_message_handler
+        ),
+        group=1  # другая группа, чтобы не конфликтовать с ConversationHandler
+    )
 
     if application.job_queue:
         application.job_queue.run_repeating(check_pending_tickets, interval=3600, first=60)
