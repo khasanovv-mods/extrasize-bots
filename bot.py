@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import asyncio
 import logging
 import os
 from datetime import datetime
@@ -21,20 +20,20 @@ from database import (
     get_old_pending_tickets, take_ticket, update_status
 )
 
-# ========== КОНФИГ ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    # фолбэк для локального теста
     try:
         from config import BOT_TOKEN as LOCAL_TOKEN
         BOT_TOKEN = LOCAL_TOKEN
     except ImportError:
         pass
+
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не задан")
 
 ADMIN_IDS_STR = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_STR.split(",") if x.strip()]
+
 if not ADMIN_IDS:
     try:
         from config import ADMIN_IDS as LOCAL_ADMINS
@@ -48,10 +47,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ========== СОСТОЯНИЯ ==========
 WAITING_QUESTION, WAITING_REPLY = range(2)
 
-# ========== ТЕКСТЫ ==========
 PRICE_LIST_IMAGE = "https://i.ibb.co/jZ1WtWRL/photo-2026-04-06-03-21-49-2.jpg"
 
 PRICE_LIST_TEXT = """
@@ -85,7 +82,6 @@ PRICE_LIST_TEXT = """
 <i>Цены актуальны на май 2026 г.</i>
 """
 
-# ========== КЛАВИАТУРЫ ==========
 user_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="❓ Задать вопрос")],
@@ -96,7 +92,6 @@ user_keyboard = ReplyKeyboardMarkup(
 )
 
 
-# ========== /start ==========
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await update.message.reply_text(
@@ -108,7 +103,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ========== ПРАЙС-ЛИСТ ==========
 async def show_price_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await update.message.reply_photo(
@@ -127,7 +121,6 @@ async def show_price_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-# ========== СВЯЗЬ С АДМИНИСТРАЦИЕЙ ==========
 async def contact_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📞 <b>Связь с администрацией</b>\n\n"
@@ -140,8 +133,7 @@ async def contact_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAITING_QUESTION
 
 
-# ========== УТИЛИТА: ОТПРАВКА ТИКЕТА ВСЕМ АДМИНАМ ==========
-def build_admin_kb(ticket_id: int, ticket_type: str) -> InlineKeyboardMarkup:
+def build_admin_kb(ticket_id, ticket_type):
     if ticket_type == "idea":
         return InlineKeyboardMarkup([
             [
@@ -163,7 +155,7 @@ async def notify_admins_new_ticket(context, ticket_id, user, ticket_type, conten
     text = (
         f"{header} <b>#{ticket_id}</b>\n\n"
         f"👤 От: @{username} (ID: <code>{user.id}</code>)\n\n"
-        f"📄 <b>Содержание:</b>\n{content or '<i>(без текста)</i>'}"
+        f"📄 <b>Содержание:</b>\n{content or '(без текста)'}"
     )
 
     kb = build_admin_kb(ticket_id, ticket_type)
@@ -186,7 +178,6 @@ async def notify_admins_new_ticket(context, ticket_id, user, ticket_type, conten
             logger.error(f"Не удалось отправить тикет админу {admin_id}: {e}")
 
 
-# ========== СОЗДАНИЕ ТИКЕТА (текст/фото/видео/файл) ==========
 async def _create_ticket_from_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     user = update.effective_user
@@ -229,9 +220,7 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await _create_ticket_from_message(update, context)
 
 
-# ========== ЗАХВАТ ТИКЕТА (общая функция) ==========
 async def _try_take(query, ticket_id, action_name):
-    """Возвращает ticket dict, если удалось взять, иначе None (и отвечает юзеру)."""
     admin = query.from_user
 
     if admin.id not in ADMIN_IDS:
@@ -244,11 +233,9 @@ async def _try_take(query, ticket_id, action_name):
         return None
 
     if ticket["status"] != "pending":
-        # Уже занят или обработан
         if ticket["taken_by_username"] and ticket["taken_by"] != admin.id:
             await query.answer(
-                f"⛔ Тикет #{ticket_id} уже обработал администратор "
-                f"@{ticket['taken_by_username']}",
+                f"⛔ Тикет #{ticket_id} уже обработал администратор @{ticket['taken_by_username']}",
                 show_alert=True
             )
         else:
@@ -264,7 +251,6 @@ async def _try_take(query, ticket_id, action_name):
             )
         return None
 
-    # пытаемся атомарно захватить
     ok = await take_ticket(ticket_id, admin.id, admin.username or admin.full_name)
     if not ok:
         await query.answer(
@@ -273,21 +259,18 @@ async def _try_take(query, ticket_id, action_name):
         )
         return None
 
-    # убираем кнопки у всех админов (у себя — точно; остальным прилетит уведомление ниже)
     try:
         await query.edit_message_reply_markup(reply_markup=None)
     except Exception:
         pass
 
-    # уведомляем других админов
     for aid in ADMIN_IDS:
         if aid == admin.id:
             continue
         try:
             await query.bot.send_message(
                 aid,
-                f"ℹ️ Администратор @{admin.username or admin.full_name} "
-                f"обработал тикет <b>#{ticket_id}</b> ({action_name}).",
+                f"ℹ️ Администратор @{admin.username or admin.full_name} обработал тикет <b>#{ticket_id}</b> ({action_name}).",
                 parse_mode=ParseMode.HTML
             )
         except Exception:
@@ -296,7 +279,6 @@ async def _try_take(query, ticket_id, action_name):
     return ticket
 
 
-# ========== ОТВЕТИТЬ ==========
 async def reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -317,7 +299,6 @@ async def reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _send_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет ответ юзеру (универсально: текст/фото/видео/документ)."""
     if update.effective_user.id not in ADMIN_IDS:
         return ConversationHandler.END
 
@@ -360,7 +341,6 @@ async def _send_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update_status(ticket_id, "answered")
     await update.message.reply_text(f"✅ Ответ по тикету #{ticket_id} отправлен.")
 
-    # уведомим других админов
     for aid in ADMIN_IDS:
         if aid == update.effective_user.id:
             continue
@@ -376,7 +356,6 @@ async def _send_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ========== ОДОБРИТЬ ==========
 async def approve_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -414,7 +393,6 @@ async def approve_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
-# ========== ОТКАЗАТЬ ==========
 async def reject_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -452,14 +430,12 @@ async def reject_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
-# ========== ОТМЕНА ==========
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("reply_ticket_id", None)
     await update.message.reply_text("❌ Действие отменено.", reply_markup=user_keyboard)
     return ConversationHandler.END
 
 
-# ========== /pending (для админов) ==========
 async def cmd_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("⛔ Нет прав")
@@ -488,7 +464,6 @@ async def cmd_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
-# ========== НАПОМИНАНИЕ ==========
 async def check_pending_tickets(context: ContextTypes.DEFAULT_TYPE):
     tickets = await get_old_pending_tickets(hours=24)
     if not tickets:
@@ -505,7 +480,6 @@ async def check_pending_tickets(context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
-# ========== ЗАПУСК ==========
 async def post_init(app: Application):
     await init_db()
     logger.info("✅ БД инициализирована")
@@ -519,7 +493,6 @@ def main():
         .build()
     )
 
-    # Создание тикета
     question_conv = ConversationHandler(
         entry_points=[
             MessageHandler(filters.Regex("^❓ Задать вопрос$"), contact_admin),
@@ -538,7 +511,6 @@ def main():
         per_message=False,
     )
 
-    # Ответ админа на тикет
     reply_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(reply_button, pattern=r"^reply_\d+$")],
         states={
@@ -565,7 +537,6 @@ def main():
     application.add_handler(CallbackQueryHandler(approve_button, pattern=r"^approve_\d+$"))
     application.add_handler(CallbackQueryHandler(reject_button, pattern=r"^reject_\d+$"))
 
-    # Напоминания
     if application.job_queue:
         application.job_queue.run_repeating(check_pending_tickets, interval=3600, first=60)
         logger.info("✅ Напоминания настроены")
